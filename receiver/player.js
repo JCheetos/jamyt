@@ -256,20 +256,53 @@
       switch (op) {
         case 'loadQueue': {
           const items = Array.isArray(cmd.items) ? cmd.items : [];
-          queue = items
+          const newQueue = items
             .map((it) => ({
               videoId: (it && it.videoId) ? String(it.videoId) : '',
               title: (it && it.title) ? String(it.title) : '',
             }))
             .filter((it) => it.videoId.length > 0);
 
-          const startIdx = (typeof cmd.startIndex === 'number') ? cmd.startIndex : 0;
-          currentIndex = (queue.length > 0)
-            ? Math.max(0, Math.min(queue.length - 1, startIdx))
-            : -1;
+          // Update inteligente: si el videoId actualmente en reproducción
+          // sigue existiendo en la nueva cola, mantén el currentIndex apuntándolo
+          // y NO reinicies la reproducción. Si no sigue, carga startIndex.
+          let preserveIndex = -1;
+          if (
+            ytPlayer && ytApiReady && currentIndex >= 0 &&
+            currentIndex < queue.length && queue[currentIndex]
+          ) {
+            const currentVideoId = queue[currentIndex].videoId;
+            preserveIndex = newQueue.findIndex((it) => it.videoId === currentVideoId);
+          }
 
-          sendStatus({ op: 'queue', size: queue.length, index: currentIndex });
-          if (currentIndex >= 0 && queue[currentIndex]) {
+          queue = newQueue;
+
+          if (preserveIndex >= 0) {
+            currentIndex = preserveIndex;
+            log('loadQueue: videoId actual conservado en idx=' + currentIndex +
+              ' (no recargamos, seguimos reproduciendo)');
+          } else {
+            const startIdx = (typeof cmd.startIndex === 'number') ? cmd.startIndex : 0;
+            currentIndex = (queue.length > 0)
+              ? Math.max(0, Math.min(queue.length - 1, startIdx))
+              : -1;
+            if (currentIndex >= 0 && queue[currentIndex]) {
+              log('loadQueue: arrancando desde idx=' + currentIndex +
+                ' (videoId=' + queue[currentIndex].videoId + ')');
+            }
+          }
+
+          sendStatus({
+            op: 'queue',
+            size: queue.length,
+            index: currentIndex,
+            videoId: (currentIndex >= 0 && queue[currentIndex])
+              ? queue[currentIndex].videoId : '',
+          });
+
+          if (preserveIndex >= 0) {
+            // No hacer nada: YouTube IFrame sigue con su videoId actual.
+          } else if (currentIndex >= 0 && queue[currentIndex]) {
             loadYouTubePlayer(queue[currentIndex].videoId);
           } else {
             log('loadQueue: queue vacía; nada que reproducir');
