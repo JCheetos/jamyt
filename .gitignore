@@ -14,6 +14,8 @@ captures/
 .cxx/
 *.aab
 *.apk
+*.apk.idsig
+*.aab.idsig
 output-metadata.json
 
 # IntelliJ
@@ -26,9 +28,38 @@ render.experimental.xml
 # Keystore files
 *.jks
 *.keystore
+*.p12
+*.pfx
 
 # Google Services (e.g. APIs or Firebase)
 google-services.json
 
 # Android Profiling
 *.hprof
+
+# Kotlin compiler incremental cache
+.kotlin/
+
+# OS-specific cruft
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+Thumbs.db
+ehthumbs.db
+ehthumbs_vista.db
+Desktop.ini
+.directory
+*~
+.~*
+
+# opencode (AI dev tool) state — depends on which skills the developer has installed
+.agents/
+skills-lock.json
+
+# Local-only documentation (marked "no se commitea al repo" in their content).
+# Mirrors of these for project history live on each dev's machine and in the AI chat.
+CONTEXTO_PROYECTO.md
+KNOWN_ISSUES.md
+QUICKSTART.md
+PLAN.md

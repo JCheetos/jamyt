@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">JamYT</string>
+    <string name="app_tagline">YouTube TV Jam, en tu WiFi</string>
+
+    <!-- Cast APP_ID usado por el SDK (referencia principal: AndroidManifest
+         `OPTIONS_VALUE_APPLICATION_ID`). Cuando se migre a un Custom Receiver
+         (Plan C / Paso 5), se sustituye por el ID registrado en Cast
+         Developer Console. Valor actual: placeholder 'XXXXXXXX'; ver
+         `receiver/README.md` sección 3 para instrucciones de registro. -->
+    <string name="cast_app_id_default" translatable="false">XXXXXXXX</string>
+</resources>

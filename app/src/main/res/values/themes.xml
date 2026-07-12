@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources xmlns:tools="http://schemas.android.com/tools">
+    <!--
+        Tema base de la app. Hereda del tema Material 3 DayNight (se adapta a modo claro/oscuro)
+        y elimina la ActionBar superior (usamos TopAppBar de Compose).
+    -->
+    <style name="Theme.JamYT" parent="Theme.Material3.DayNight.NoActionBar">
+        <!-- Personalizaciones opcionales (colores, tipografías) -->
+        <item name="android:statusBarColor" tools:targetApi="l">?attr/colorPrimaryContainer</item>
+    </style>
+</resources>

@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+        Paleta mínima. Material 3 generará tonalidades a partir de estos colores.
+        En el futuro podemos mover esto a themes.xml con colorPrimary, colorSecondary, etc.
+    -->
+    <color name="md_theme_primary">#7E57C2</color>
+    <color name="md_theme_onPrimary">#FFFFFF</color>
+    <color name="md_theme_primaryContainer">#EADDFF</color>
+    <color name="md_theme_onPrimaryContainer">#21005D</color>
+    <color name="md_theme_secondary">#625B71</color>
+    <color name="md_theme_tertiary">#7D5260</color>
+</resources>

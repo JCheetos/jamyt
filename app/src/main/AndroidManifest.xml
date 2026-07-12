@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- Necesarios para descubrimiento LAN y Cast -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
+
+    <!-- Para Cast SDK (Fase 2) -->
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+
+    <application
+        android:allowBackup="true"
+        android:label="@string/app_name"
+        android:theme="@style/Theme.JamYT"
+        android:usesCleartextTraffic="true">
+
+        <!-- Cast SDK: opciones del framework y provider de CastOptions. -->
+        <!-- Sin estos meta-data, CastContext.getSharedInstance() cae a opciones
+             por defecto sin APP_ID: la sesión resultante NO es una CastSession
+             real (ver CastOptionsProvider.kt para el detalle). -->
+        <meta-data
+            android:name="com.google.android.gms.cast.framework.OPTIONS_VALUE_APPLICATION_ID"
+            android:value="@string/cast_app_id_default" />
+        <meta-data
+            android:name="com.google.android.gms.cast.framework.OPTIONS_PROVIDER_CLASS_NAME"
+            android:value="com.jamyt.cast.JamytCastOptionsProvider" />
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:theme="@style/Theme.JamYT">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+    </application>
+
+</manifest>

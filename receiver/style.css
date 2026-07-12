@@ -1,0 +1,33 @@
+/* Reset y pantalla completa. Sin esto el reproductor de YouTube deja un
+   borde blanco y bandas negras en TVs 16:9. */
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html,
+body {
+  width: 100%;
+  height: 100%;
+  background: #000;
+  overflow: hidden;
+  /* Evita zoom/pinch por gestos accidentales en TVs táctiles. */
+  touch-action: none;
+}
+
+#player {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  border: 0;
+}
+
+/* Si YouTube inyecta iframes internos, forzamos su tamaño. */
+#player iframe {
+  width: 100% !important;
+  height: 100% !important;
+  border: 0;
+}

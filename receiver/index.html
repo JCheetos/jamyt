@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>JamYT Receiver</title>
+  <link rel="stylesheet" href="style.css" />
+
+  <!-- Cast Application Framework: provee window.cast.framework.*.
+       El archivo se sirve desde gstatic (HTTPS) por lo que no se afecta por
+       el path del Pages site. -->
+  <script src="//www.gstatic.com/cast/receiver/caf_receiver.js"></script>
+</head>
+<body>
+  <!-- Contenedor donde el YouTube IFrame Player se inyecta en runtime.
+       Ocupa toda la pantalla; el CSS fuerza 100% × 100%. -->
+  <div id="player"></div>
+
+  <!-- Lógica de puente CAF ↔ YouTube IFrame Player.
+       Cargado al final del body para asegurar que el div #player existe. -->
+  <script src="player.js"></script>
+</body>
+</html>
