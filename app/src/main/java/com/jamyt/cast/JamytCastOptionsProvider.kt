@@ -43,26 +43,22 @@ class JamytCastOptionsProvider : OptionsProvider {
 
     companion object {
         /**
-         * Application ID del Cast Receiver.
+         * Application ID del Cast Receiver (registrado en Cast Developer Console).
          *
-         * Valor por defecto: `CC1AD845` = Default Media Receiver (compartido
-         * por todas las apps Cast del mundo). Reproduce MP4/HLS pero NO
-         * YouTube URLs.
+         * Origen del valor: tras subir el Custom Receiver de `receiver/index.html`
+         * a GitHub Pages y registrarlo en <https://cast.google.com/publish/>, Google
+         * devuelve este APP_ID único. Apunta a nuestra URL Pages; el Cast SDK
+         * enruta el tráfico al receiver propio, NO al Default Media Receiver.
          *
-         * Para reproducir YouTube, sustituir por el `APP_ID` propio
-         * registrado en Cast Developer Console tras subir el Custom Receiver
-         * de `receiver/index.html` a GitHub Pages. Ver `receiver/README.md`
-         * sección 3 para el flujo de registro.
-         *
-         * Mientras el valor siga siendo `CC1AD845` o cualquier placeholder,
-         * la app casteará contra el DMR y los videos de YouTube serán
-         * rechazados con `idleReason=4 ERROR` (esperado hasta tener el
-         * Custom Receiver registrado).
+         * Si por alguna razón necesitas revertir al DMR (p.ej. para diagnosticar),
+         * cambia este valor a `CastMediaControlIntent.DEFAULT_MEDIA_RECEIVER_APPLICATION_ID`
+         * = `"CC1AD845"`. Los videos de YouTube dejarán de funcionar (DMR los
+         * rechaza con `idleReason=4`), pero el resto del pipeline Cast sigue
+         * funcionando.
          *
          * Valor público: cualquier capa del sender (CastManager, UI, MediaRouteSelector)
          * lo usa para filtrar con `categoryForCast(APP_ID)`.
          */
-        const val APP_ID: String =
-            "XXXXXXXX" // PLACEHOLDER — sustituir por el APP_ID real tras registrar en Cast Console.
+        const val APP_ID: String = "70729FA3"
     }
 }

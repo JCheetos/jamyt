@@ -62,22 +62,42 @@ definiremos aquí un namespace propio (p.ej. `urn:x-cast:com.jamyt.cola`).
 
 ## 4. Validación local antes de probar en TV
 
-Antes de tocar código Android, valida el receiver en local:
+### ⚠️ IMPORTANTE: no abras esta URL en navegador normal
 
-### Opción A: HTTP server local
+Si abres `https://jcheetos.github.io/jamyt/receiver/` en Chrome (o cualquier
+navegador) **sin contexto Cast**, la consola mostrará:
 
-```bash
-cd receiver
-python3 -m http.server 8000
-# Abre http://localhost:8000 en navegador; fondo negro, sin errores
+```
+Uncaught ReferenceError: cast is not defined
 ```
 
-### Opción B: Extensión "Cast Player" para Chrome
+Esto es **esperado, no es un bug tuyo**. CAF (Cast Application Framework)
+solo expone el namespace `cast.framework.*` cuando la página corre en:
 
-1. Instala "Cast Player" (Google Cast Debugger for Chrome).
-2. Abre tu URL Pages (`https://jcheetos.github.io/jamyt/receiver/`).
-3. Click en el icono Cast de la extensión → selecciona el Chromecast.
-4. En "Load Media":
+1. Un dispositivo Cast real (Chromecast, Google TV, Android TV).
+2. La extensión **Google Cast Debugger** para Chrome.
+3. La extensión **Cast Player Debug** para Chrome.
+
+`player.js` tiene un guard defensivo al inicio que detecta este caso y
+loggea un diagnóstico útil en lugar de crashear (`[JamYT Receiver] CAF no
+está disponible`).
+
+### Opción A: HTTP server local con Cast Debugger (validación en navegador)
+
+1. Instala la extensión **Google Cast Debugger** desde Chrome Web Store
+   (búscala por nombre; varias hacen lo mismo).
+2. Activa la extensión (debe abrir su ventana).
+3. Servir el receiver en local:
+   ```bash
+   cd receiver
+   python3 -m http.server 8000
+   ```
+4. Abre `http://localhost:8000` en navegador.
+5. En la consola debe aparecer:
+   ```
+   [JamYT Receiver] CAF detectado, inicializando receiver…
+   ```
+6. Ahora puedes usar la consola del Cast Debugger para inyectar media:
    ```json
    {
      "requestId": 1,
@@ -91,7 +111,21 @@ python3 -m http.server 8000
      "autoplay": true
    }
    ```
-5. El TV debería reproducir ese video.
+   → El iframe de YouTube debería reproducir `aOKAtVAVtDw`.
+
+### Opción B: Validar directo en TV (validación real)
+
+Esta es la prueba que importa:
+
+1. Compila y reinstala la app: `adb install -r app/build/outputs/apk/debug/app-debug.apk`
+2. Asegúrate de que el TV (Chromecast / Google TV) está encendido y en la misma WiFi.
+3. Añade un video a la cola.
+4. Tap Cast → selecciona el TV.
+5. El video debería reproducir **dentro de la app YouTube del TV**,
+   no en una pestaña del navegador, gracias al IFrame embed.
+
+Si el TV muestra el video correctamente en `https://www.youtube.com/embed/<videoId>`,
+la integración Cast → Custom Receiver → YouTube IFrame está completa.
 
 ---
 

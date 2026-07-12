@@ -23,6 +23,70 @@
   'use strict';
 
   /* ====================================================================
+   * Boot: espera a que la página esté cargada y verifica que CAF esté
+   * presente antes de iniciar. Si no está, mostramos un diagnóstico útil.
+   * ==================================================================== */
+
+  function init() {
+    // CAF (window.cast.framework.CastReceiverContext) solo expone su API
+    // completa cuando la página corre en un dispositivo Cast (Chromecast,
+    // Google TV, Android TV) o cuando un Cast Debugger simula ese contexto.
+    // Si abres esta URL en un navegador normal sin la extensión, `cast`
+    // queda undefined y esta línea tira ReferenceError — ruidoso e inútil.
+    if (
+      typeof cast === 'undefined' ||
+      !cast.framework ||
+      !cast.framework.CastReceiverContext
+    ) {
+      console.warn(
+        '%c[JamYT Receiver]',
+        'background:#e0a;color:white;padding:2px 6px;border-radius:3px;font-weight:bold',
+        'CAF (Cast Application Framework) no está disponible.',
+      );
+      console.warn(
+        '[JamYT Receiver] Causa probable: abriste la URL del receiver en un ' +
+          'navegador normal, sin contexto Cast. La API `cast.framework.*` solo ' +
+          'se expone dentro de un dispositivo Cast o simulando el contexto.',
+      );
+      console.warn(
+        '[JamYT Receiver] Cómo validar en navegador: instala la extensión ' +
+          '"Cast Debugger" o "Google Cast Debugger" para Chrome, actívala y ' +
+          'luego carga esta URL.',
+      );
+      console.warn(
+        '[JamYT Receiver] Cómo validar en TV: castea desde la app Android ' +
+          'hacia el TV (Chromecast / Google TV) y `cast.framework.*` se ' +
+          'expondrá automáticamente. En ese caso los mensajes siguientes ' +
+          'los verás en la consola del TV, no en la del navegador.',
+      );
+      return;
+    }
+
+    console.log(
+      '%c[JamYT Receiver]',
+      'background:#0a7;color:white;padding:2px 6px;border-radius:3px;font-weight:bold',
+      'CAF detectado, inicializando receiver…',
+    );
+
+    startReceiver();
+  }
+
+  // Esperar al evento DOMContentLoaded antes de ejecutar la lógica del
+  // receiver. Garantiza que `caf_receiver.js` (cargado en <head>) haya
+  // terminado de bootstrap.
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init, { once: true });
+  } else {
+    // DOMContentLoaded ya disparó (script cargado tarde); ejecutar ahora.
+    init();
+  }
+
+  /* ====================================================================
+   * Lógica real del receiver
+   * ==================================================================== */
+  function startReceiver() {
+
+  /* ====================================================================
    * Constantes y estado del receiver
    * ==================================================================== */
 
