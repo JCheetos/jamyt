@@ -6,8 +6,13 @@
   <title>JamYT Receiver</title>
   <link rel="stylesheet" href="style.css" />
 
-  <!-- Cast Application Framework: provee window.cast.framework.* -->
-  <script src="//www.gstatic.com/cast/receiver/caf_receiver.js"></script>
+  <!-- Cast Application Framework: provee window.cast.framework.*.
+       ⚠️ URL CRÍTICA — la documentación vieja (//www.gstatic.com/cast/receiver/caf_receiver.js)
+       devuelve 404 desde 2024 y hace que `cast` quede undefined, dándonos
+       el síntoma "TV en negro 60s + error 2473". URL nueva tomada de
+       https://developers.google.com/cast/docs/caf_receiver/basic (sección
+       "Google Web Receiver SDK"). -->
+  <script src="//www.gstatic.com/cast/sdk/libs/caf_receiver/v3/cast_receiver_framework.js"></script>
 </head>
 <body>
   <!-- Contenedor donde el YouTube IFrame Player se inyecta en runtime -->
