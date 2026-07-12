@@ -186,30 +186,11 @@
     }
 
     /* ====================================================================
-     * 2. start(options) — anunciar el receiver al framework Cast
-     * ==================================================================== */
-
-    try {
-      const options = new cast.framework.CastReceiverOptions();
-      // No necesitamos un PlayerManager custom; el <cast-media-player>
-      // existe en el DOM pero no lo usamos (display:none). El cast framework
-      // solo requiere su presencia para inicializarse.
-      context.start(options);
-      logOk('context.start(options) OK — receiver is now Cast-ready');
-      overlayHint(
-        'Receptor listo. Auto-hide en 6s. Si recibes mensajes del sender, ' +
-        'verás: load, play, pause, status events.',
-      );
-      setTimeout(hideOverlay, 6000);
-    } catch (e) {
-      logError('context.start FAILED', e);
-      return;
-    }
-
-    /* ====================================================================
-     * 3. addCustomMessageListener(namespace, handler)
+     * 2. addCustomMessageListener(namespace, handler)
      *
-     * A partir de aquí el receiver está escuchando comandos de la app Android.
+     * ⚠️ CRÍTICO: debe llamarse ANTES de context.start(). Después de start,
+     * el sistema no acepta nuevos namespaces (error "New namespaces can not
+     * be requested after start has been called").
      * ==================================================================== */
 
     try {
@@ -234,6 +215,27 @@
       logOk('addCustomMessageListener registered for ' + NAMESPACE);
     } catch (e) {
       logError('addCustomMessageListener FAILED', e);
+      return;
+    }
+
+    /* ====================================================================
+     * 3. start(options) — anunciar el receiver al framework Cast
+     * ==================================================================== */
+
+    try {
+      const options = new cast.framework.CastReceiverOptions();
+      // No necesitamos un PlayerManager custom; el <cast-media-player>
+      // existe en el DOM pero no lo usamos (display:none). El cast framework
+      // solo requiere su presencia para inicializarse.
+      context.start(options);
+      logOk('context.start(options) OK — receiver is now Cast-ready');
+      overlayHint(
+        'Receptor listo. Auto-hide en 6s. Si recibes mensajes del sender, ' +
+        'verás: load, play, pause, status events.',
+      );
+      setTimeout(hideOverlay, 6000);
+    } catch (e) {
+      logError('context.start FAILED', e);
       return;
     }
 
