@@ -14,6 +14,7 @@ body {
   overflow: hidden;
   /* Evita zoom/pinch por gestos accidentales en TVs táctiles. */
   touch-action: none;
+  font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
 }
 
 #player {
@@ -25,9 +26,79 @@ body {
   border: 0;
 }
 
-/* Si YouTube inyecta iframes internos, forzamos su tamaño. */
 #player iframe {
   width: 100% !important;
   height: 100% !important;
   border: 0;
+}
+
+/* ============================================================================
+   Overlay de diagnóstico. Visible durante el boot del receiver, se auto-oculta
+   si context.start(options) tiene éxito. Si hay error, permanece visible hasta
+   que el usuario lo oculte manualmente.
+   ============================================================================ */
+
+#jamyt-status {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 10000;
+  background: rgba(0, 0, 0, 0.88);
+  color: #fff;
+  padding: 20px 28px;
+  max-height: 100vh;
+  overflow-y: auto;
+  font-size: 16px;
+  line-height: 1.4;
+  transition: opacity 1.2s ease-out;
+  border-bottom: 4px solid #0e8;
+}
+
+#jamyt-status.hidden {
+  opacity: 0;
+  pointer-events: none;
+}
+
+#jamyt-status.error {
+  border-bottom-color: #f44;
+}
+
+.jamyt-status-header {
+  font-weight: 700;
+  font-size: 18px;
+  margin-bottom: 12px;
+  color: #0e8;
+}
+
+#jamyt-status.error .jamyt-status-header {
+  color: #f44;
+}
+
+.jamyt-status-detail {
+  font-family: 'Courier New', Courier, monospace;
+  font-size: 13px;
+  line-height: 1.5;
+  color: #ccc;
+  max-height: 50vh;
+  overflow-y: auto;
+}
+
+.jamyt-line {
+  padding: 3px 0;
+  border-bottom: 1px dashed #333;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.jamyt-line.ok    { color: #8e8; }
+.jamyt-line.warn  { color: #ea4; }
+.jamyt-line.err   { color: #fa4; font-weight: 700; }
+.jamyt-line.boot  { color: #6cf; font-weight: 700; }
+
+.jamyt-status-hint {
+  margin-top: 14px;
+  font-size: 12px;
+  color: #999;
+  font-style: italic;
 }

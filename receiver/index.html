@@ -6,18 +6,21 @@
   <title>JamYT Receiver</title>
   <link rel="stylesheet" href="style.css" />
 
-  <!-- Cast Application Framework: provee window.cast.framework.*.
-       El archivo se sirve desde gstatic (HTTPS) por lo que no se afecta por
-       el path del Pages site. -->
+  <!-- Cast Application Framework: provee window.cast.framework.* -->
   <script src="//www.gstatic.com/cast/receiver/caf_receiver.js"></script>
 </head>
 <body>
-  <!-- Contenedor donde el YouTube IFrame Player se inyecta en runtime.
-       Ocupa toda la pantalla; el CSS fuerza 100% × 100%. -->
+  <!-- Contenedor donde el YouTube IFrame Player se inyecta en runtime -->
   <div id="player"></div>
 
-  <!-- Lógica de puente CAF ↔ YouTube IFrame Player.
-       Cargado al final del body para asegurar que el div #player existe. -->
+  <!-- Overlay de diagnóstico en pantalla:
+       visible si el receiver falla, auto-oculto tras boot exitoso. -->
+  <div id="jamyt-status">
+    <div class="jamyt-status-header" id="jamyt-status-header">[JamYT] Receiver inicializando…</div>
+    <div class="jamyt-status-detail" id="jamyt-status-detail"></div>
+    <div class="jamyt-status-hint" id="jamyt-status-hint"></div>
+  </div>
+
   <script src="player.js"></script>
 </body>
 </html>
