@@ -18,6 +18,11 @@
   <!-- Contenedor donde el YouTube IFrame Player se inyecta en runtime -->
   <div id="player"></div>
 
+  <!-- <cast-media-player> es REQUERIDO por CAF v3 (getInstance() throws si no existe).
+       Lo creamos hidden y no lo usamos para nada: todo el playback pasa por
+       YouTube IFrame Player vía mensajes custom sobre nuestro namespace. -->
+  <cast-media-player class="castMediaElement" style="display:none"></cast-media-player>
+
   <!-- Overlay de diagnóstico en pantalla:
        visible si el receiver falla, auto-oculto tras boot exitoso. -->
   <div id="jamyt-status">

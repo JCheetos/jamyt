@@ -1,17 +1,12 @@
 package com.jamyt.cast
 
 import android.content.Context
-import android.net.Uri
 import android.util.Log
-import com.google.android.gms.cast.MediaInfo
-import com.google.android.gms.cast.MediaMetadata
-import com.google.android.gms.cast.MediaQueueItem
+import com.google.android.gms.cast.Cast
 import com.google.android.gms.cast.MediaStatus
 import com.google.android.gms.cast.framework.CastContext
 import com.google.android.gms.cast.framework.CastSession
 import com.google.android.gms.cast.framework.SessionManagerListener
-import com.google.android.gms.cast.framework.media.RemoteMediaClient
-import com.google.android.gms.common.images.WebImage
 import com.jamyt.queue.QueueItem
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -20,6 +15,9 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import org.json.JSONArray
+import org.json.JSONObject
 import java.util.concurrent.Executors
 
 /**
@@ -60,22 +58,32 @@ private fun idleReasonName(reason: Int): String = when (reason) {
 /**
  * Wrapper del Google Cast SDK (CAF v22.x).
  *
- * Estrategia: usamos el **Default Media Receiver** con `STREAM_TYPE_NONE`.
- * Esto significa:
- *  - No necesitamos registrar la app en Cast Developer Console.
- *  - Pasamos URLs de YouTube al TV; la app YouTube TV nativa del TV se encarga
- *    de la reproducción (con sus anuncios según la cuenta del TV).
- *  - El Cast NO participa en la lógica del mesh P2P. Es ortogonal: cualquier
- *    peer puede castear, los demás siguen sincronizando la cola por su cuenta.
+ * Estrategia v2 del archivo: usábamos `RemoteMediaClient.queueLoad(...)`
+ * con `MediaInfo` y `STREAM_TYPE_NONE` para que el Default Media Receiver
+ * rechazase con `idleReason=4 ERROR` y todo el control pasara por nuestro
+ * Custom Receiver. Esto ya no funciona porque:
  *
- * Si en el futuro migramos a un Custom Receiver (para ocultar anuncios o
- * personalizar UI), basta con cambiar `APP_ID` por el ID registrado en la
- * consola de Cast.
+ *   1. El DMR rechaza las URLs de YouTube (firma, no stream directo).
+ *   2. El Custom Receiver nuevo (CAF v3) requiere `cast-media-player` en
+ *      el DOM y eliminó `playerManager.setMediaElementRequestHandler`
+ *      en favor de mensajes custom sobre namespace propio.
  *
- * Nota sobre la versión del SDK: play-services-cast-framework:22.1.0.
- *  - CastContext.getSharedInstance() ahora retorna Task<CastContext> (async).
- *  - SessionManagerListener requiere onSessionEnding() implementado.
- *  - MediaMetadata/MediaQueueItem siguen disponibles con la API clásica.
+ * Estrategia v3 del archivo (la actual): hablamos con el receiver vía
+ * `CastSession.sendMessage(NAMESPACE, json)` directamente. Saltamos
+ * completamente `RemoteMediaClient` y `MediaInfo`. El receiver:
+ *   - Recibe las instrucciones (loadQueue, play, pause, next, prev)
+ *   - Crea YouTube IFrame Player directamente con los videoIds
+ *   - Gestiona la cola de forma autónoma (auto-advance en ENDED)
+ *   - Reporta status al sender vía messages de vuelta sobre el mismo
+ *     namespace.
+ *
+ * Por qué funciona para YouTube: YouTube IFrame Player reproduce desde
+ * `youtube.com/embed/<videoId>` — el navegador del TV puede hacer esto
+ * directamente, sin que el SDK de Cast intente procesar el URL.
+ *
+ * Notas sobre la versión del SDK: play-services-cast-framework:22.1.0.
+ * Las APIs custom (sendMessage, setMessageReceivedCallback, getCastSession)
+ * funcionan en CAF v22.x y CAF v3 del Receiver.
  */
 class CastManager(
     private val context: Context,
@@ -84,7 +92,6 @@ class CastManager(
 ) {
     private var castContext: CastContext? = null
     private var castSession: CastSession? = null
-    private var remoteMediaClient: RemoteMediaClient? = null
 
     // Estado del Cast expuesto a la UI para diagnóstico en pantalla.
     private val _debugInfo = MutableStateFlow(CastDebugInfo())
@@ -92,15 +99,14 @@ class CastManager(
 
     // Executor dedicado para inicializar CastContext (la API v22 lo requiere).
     private val executor = Executors.newSingleThreadExecutor()
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
     /**
      * Inicializa el Cast SDK. Llamar una sola vez en onCreate de la Activity
      * (o cada vez que el proceso se reconstruya tras onDestroy/onCreate).
      *
-     * APP_ID y CastOptions vienen ahora de `JamytCastOptionsProvider` (declarado
-     * en AndroidManifest con `OPTIONS_PROVIDER_CLASS_NAME`). NO hace falta
-     * `setReceiverApplicationId` programático: el provider es la fuente de verdad.
+     * APP_ID y CastOptions vienen de `JamytCastOptionsProvider` (declarado
+     * en AndroidManifest con `OPTIONS_PROVIDER_CLASS_NAME`).
      */
     fun initialize() {
         try {
@@ -137,92 +143,88 @@ class CastManager(
     }
 
     /**
-     * Carga una lista de videos en el TV. Cada item se construye con
-     * `STREAM_TYPE_NONE` y un `contentId` en formato `ytvideo:<videoId>`
-     * que el Custom Receiver (ver `receiver/README.md`) sabe parsear y
-     * pasar a YouTube IFrame Player. Sin este acuerdo con el receiver,
-     * el Default Media Receiver rechazaría los videos con `idleReason=4`.
+     * Envía la cola de items al TV vía mensaje custom (NAMESPACE + JSON).
+     *
+     * Formato: `{"op":"loadQueue","items":[{"videoId","title"}],"startIndex":0}`
+     *
+     * El receiver los parsea, crea YouTube IFrame Players y reproduce
+     * el item en `startIndex`. Auto-advance es responsabilidad del receiver
+     * (cuando YouTube reporta ENDED).
+     *
+     * Suspendimos porque `CastSession.sendMessage` debe invocarse en main
+     * thread (es una llamada al binder del SDK Cast) — `withContext(Main.immediate)`
+     * lo asegura si estamos en una coroutine que ya corre allí, o cambia
+     * contexto si estamos en IO.
      */
-    fun loadQueue(items: List<QueueItem>, startIndex: Int = 0) {
+    suspend fun loadQueue(items: List<QueueItem>, startIndex: Int = 0) {
         if (items.isEmpty()) return
-        val client = remoteMediaClient ?: run {
+        val session = castSession ?: run {
             Log.w(TAG, "No hay sesión Cast activa; loadQueue ignorado")
             return
         }
 
-        val queueItems = items.map { item ->
-            val url = buildYoutubeUrl(item.videoId)
-            val mediaInfo = MediaInfo.Builder("ytvideo:${item.videoId}")
-                // STREAM_TYPE_NONE: el TV NO hace streaming directo. Espera que
-                // el receiver (o el TV mismo) sepa qué hacer con la URL.
-                .setStreamType(MediaInfo.STREAM_TYPE_NONE)
-                // setContentUrl conserva la URL canónica de YouTube; la usan
-                // los TVs y receivers que NO son el nuestro para navegar al
-                // video vía app nativa YouTube.
-                .setContentUrl(url)
-                .setMetadata(
-                    MediaMetadata(MediaMetadata.MEDIA_TYPE_MOVIE)
-                        .also {
-                            it.putString(MediaMetadata.KEY_TITLE, item.title)
-                            // Algunos TVs (Google TV especialmente) usan un campo
-                            // "entity" con formato "ytvideo:<id>" para reconocer
-                            // el contenido como YouTube y abrir la app nativa.
-                            // No hay constante KEY_ENTITY en el SDK, usamos el
-                            // string literal directamente.
-                            it.putString("entity", "ytvideo:${item.videoId}")
-                        }
-                )
-                .build()
-
-            MediaQueueItem.Builder(mediaInfo)
-                .setAutoplay(true)
-                .setPreloadTime(5.0)
-                .build()
+        val itemsJson = JSONArray()
+        items.forEach { item ->
+            itemsJson.put(JSONObject().apply {
+                put("videoId", item.videoId)
+                put("title", item.title)
+            })
         }
+        val message = JSONObject().apply {
+            put("op", "loadQueue")
+            put("items", itemsJson)
+            put("startIndex", startIndex)
+        }.toString()
 
         try {
-            // Cargamos la cola COMPLETA en el TV usando queueLoad().
-            // Esta es la API legacy pero estable para cargar varios items.
-            // Los modos de repeat son: 0 = REPEAT_OFF, 1 = REPEAT_ALL, 2 = REPEAT_SINGLE.
-            // Usamos 0 (sin loop).
-            val safeStartIndex = startIndex.coerceIn(0, queueItems.lastIndex)
-            client.queueLoad(queueItems.toTypedArray(), safeStartIndex, /* repeatMode */ 0, /* customData */ null)
-            Log.i(TAG, "Cargando cola con ${queueItems.size} item(s) en TV (startIndex=$safeStartIndex)")
+            val ok = withContext(Dispatchers.Main.immediate) {
+                session.sendMessage(NAMESPACE, message)
+            }
+            Log.i(TAG, "Sent loadQueue(${items.size} items) via $NAMESPACE, ok=$ok")
             updateDebug {
                 it.copy(
-                    lastLoadAttemptItems = queueItems.size,
-                    lastEvent = "queueLoad(${queueItems.size} items)",
+                    lastLoadAttemptItems = items.size,
+                    lastEvent = "sent loadQueue(${items.size} items) ok=$ok",
                 )
             }
         } catch (e: Exception) {
-            val msg = e.message ?: "unknown"
-            Log.e(TAG, "Error al cargar la cola en el TV: $msg")
-            updateDebug { it.copy(lastEvent = "queueLoad ERROR: $msg") }
+            val err = e.message ?: "unknown"
+            Log.e(TAG, "Error sending loadQueue: $err")
+            updateDebug { it.copy(lastEvent = "sendMessage ERROR: $err") }
         }
     }
 
-    /** Salta al siguiente item de la cola. */
-    fun skipToNext() {
-        remoteMediaClient?.queueNext(null)
-    }
+    /** Salta al siguiente item en la cola (en el receiver). */
+    fun skipToNext() = sendOp("next")
 
-    /** Pausa la reproducción en el TV. */
-    fun pause() {
-        remoteMediaClient?.pause()
-    }
+    /** Pausa la reproducción en el TV (en el receiver). */
+    fun pause() = sendOp("pause")
 
-    /** Reanuda la reproducción en el TV. */
-    fun resume() {
-        remoteMediaClient?.play()
+    /** Reanuda la reproducción en el TV (en el receiver). */
+    fun resume() = sendOp("play")
+
+    private fun sendOp(op: String) {
+        val session = castSession ?: return
+        val message = JSONObject().apply { put("op", op) }.toString()
+        try {
+            val ok = session.sendMessage(NAMESPACE, message)
+            Log.i(TAG, "Sent $op op via $NAMESPACE, ok=$ok")
+            updateDebug { it.copy(lastEvent = "sent $op ok=$ok") }
+        } catch (e: Exception) {
+            Log.w(TAG, "sendOp($op) failed: ${e.message}")
+            updateDebug { it.copy(lastEvent = "sendOp($op) failed: ${e.message}") }
+        }
     }
 
     /** True si hay un TV conectado y la sesión Cast está activa. */
     fun isConnected(): Boolean = castSession?.isConnected == true
 
     /**
-     * Libera recursos. Llamar en onStop de la Activity.
-     * No cerramos la sesión Cast (queremos que el TV siga reproduciendo aunque
-     * el celular pase a background o se desconecte temporalmente).
+     * Libera recursos. Llamar en onDestroy de la Activity si quieres
+     * ser proactivo. NO debe llamarse en onStop — el listener del
+     * SessionManager está atado al CastContext singleton, no a la
+     * Activity (si lo quitamos aquí, el CastDebugPanel quedaría ciego
+     * al volver a foreground).
      */
     fun shutdown() {
         try {
@@ -230,19 +232,18 @@ class CastManager(
                 sessionManagerListener,
                 CastSession::class.java
             )
+            try {
+                castSession?.removeMessageReceivedCallbacks(NAMESPACE)
+            } catch (_: Exception) {}
         } catch (_: Exception) {}
-        remoteMediaClient = null
         castSession = null
-        executor.shutdown()
+        try {
+            executor.shutdown()
+        } catch (_: Exception) {}
     }
 
     // ---- Privados ----
 
-    // Cada callback del SessionManagerListener dispara Log.i (visible en
-    // logcat filtrando por 'CastManager') Y updateDebug (visible en el
-    // CastDebugPanel en pantalla). Esto es diagnóstico temporal — cuando
-    // validemos el flujo completo, podemos dejar solo los updateDebug que
-    // informen al usuario.
     private val sessionManagerListener = object : SessionManagerListener<CastSession> {
         override fun onSessionStarting(session: CastSession) {
             Log.i(TAG, "onSessionStarting(tid=${Thread.currentThread().id})")
@@ -252,8 +253,11 @@ class CastManager(
         override fun onSessionStarted(session: CastSession, sessionId: String) {
             Log.i(TAG, "onSessionStarted sessionId=$sessionId (tid=${Thread.currentThread().id})")
             castSession = session
-            remoteMediaClient = session.remoteMediaClient?.apply {
-                registerCallback(mediaClientCallback)
+            try {
+                session.setMessageReceivedCallbacks(NAMESPACE, messageCallback)
+                Log.i(TAG, "setMessageReceivedCallbacks OK")
+            } catch (e: Exception) {
+                Log.w(TAG, "setMessageReceivedCallbacks failed: ${e.message}")
             }
             updateDebug { it.copy(isConnected = true, lastEvent = "▶ TV conectado (sid=${sessionId.take(6)})") }
             onSessionChanged(true)
@@ -273,8 +277,10 @@ class CastManager(
 
         override fun onSessionEnded(session: CastSession, error: Int) {
             Log.i(TAG, "onSessionEnded: error=$error")
+            try {
+                castSession?.removeMessageReceivedCallbacks(NAMESPACE)
+            } catch (_: Exception) {}
             castSession = null
-            remoteMediaClient = null
             updateDebug {
                 it.copy(
                     isConnected = false,
@@ -295,8 +301,10 @@ class CastManager(
         override fun onSessionResumed(session: CastSession, wasSuspended: Boolean) {
             Log.i(TAG, "onSessionResumed wasSuspended=$wasSuspended")
             castSession = session
-            remoteMediaClient = session.remoteMediaClient?.apply {
-                registerCallback(mediaClientCallback)
+            try {
+                session.setMessageReceivedCallbacks(NAMESPACE, messageCallback)
+            } catch (e: Exception) {
+                Log.w(TAG, "setMessageReceivedCallbacks failed on resume: ${e.message}")
             }
             updateDebug { it.copy(isConnected = true, lastEvent = "↻ TV reconectado (wasSuspended=$wasSuspended)") }
             onSessionChanged(true)
@@ -314,64 +322,57 @@ class CastManager(
         }
     }
 
-    // API v22: solo onStatusUpdated() es público (los demás están obfuscados).
-    // onStatusUpdated se dispara en cualquier cambio de estado del TV.
-    private val mediaClientCallback = object : RemoteMediaClient.Callback() {
-        override fun onStatusUpdated() {
-            val status = remoteMediaClient?.mediaStatus ?: return
-            val queueSize = status.queueItems?.size ?: 0
-
-            // Actualizar diagnóstico para mostrar en pantalla.
+    /**
+     * Callback invocado cuando el Custom Receiver envía un mensaje de status
+     * de vuelta al sender (namespace `urn:x-cast:com.jamyt.cola`).
+     *
+     * Payload esperado desde el receiver (enviado desde `player.js`):
+     *   {"op":"status","event":"playing"|"paused"|"buffering"|"ended"|"queue"|"yt_ready","index":N}
+     */
+    private val messageCallback = Cast.MessageReceivedCallback { device, namespace, message ->
+        // Firma real en v22.x: onMessageReceived(CastDevice device, String namespace, String message)
+        // NOTA: el `message` ya es String (no ByteArray); `device` es el CastDevice que lo envió.
+        Log.i(TAG, "Message from ${device?.friendlyName ?: "?"} @ $namespace: $message")
+        try {
+            val json = JSONObject(message)
+            val op = json.optString("op", "?")
+            val event = json.optString("event", "")
+            val videoId = json.optString("videoId", "")
+            val index = json.optInt("index", -1)
+            val size = json.optInt("size", -1)
+            val status = when {
+                op == "yt_ready" -> "YT IFrame Player listo"
+                op == "queue" -> "Cola: ${if (size >= 0) "$size items" else "?"} idx=$index ${if (videoId.isNotEmpty()) "→ $videoId" else ""}".trim()
+                op == "status" && event == "playing" ->
+                    "Reproduciendo en TV (item ${index})"
+                op == "status" && event == "paused" -> "TV pausado"
+                op == "status" && event == "buffering" -> "TV cargando..."
+                op == "status" && event == "ended" -> {
+                    onPlaybackFinished()
+                    "TV terminó video"
+                }
+                op == "status" && event == "error" -> "TV error: ${json.optString("detail", "")}"
+                else -> "[receiver] $op/$event"
+            }
             updateDebug {
                 it.copy(
-                    tvPlayerState = status.playerState,
-                    tvIdleReason = status.idleReason,
-                    tvQueueSize = queueSize,
+                    tvQueueSize = if (size >= 0) size else it.tvQueueSize,
+                    tvPlayerState = if (op == "status") stateFromEvent(event) else it.tvPlayerState,
+                    lastEvent = status,
                 )
             }
-
-            Log.i(TAG, "Estado TV: playerState=${status.playerState} (${playerStateName(status.playerState)}), idleReason=${status.idleReason} (${idleReasonName(status.idleReason)}), items=$queueSize")
-
-            when (status.playerState) {
-                MediaStatus.PLAYER_STATE_IDLE -> {
-                    when (status.idleReason) {
-                        MediaStatus.IDLE_REASON_FINISHED -> {
-                            updateDebug { it.copy(lastEvent = "TV terminó video") }
-                            // El TV terminó el video actual. Avisamos al PlaybackController.
-                            onPlaybackFinished()
-                        }
-                        MediaStatus.IDLE_REASON_ERROR -> {
-                            val msg = "TV ERROR (STREAM_TYPE_NONE rechazado?)"
-                            Log.e(TAG, "$msg — revisar si este TV soporta carga externa de YouTube.")
-                            updateDebug { it.copy(lastEvent = msg) }
-                        }
-                        MediaStatus.IDLE_REASON_CANCELED -> {
-                            updateDebug { it.copy(lastEvent = "TV canceló reproducción") }
-                        }
-                        MediaStatus.IDLE_REASON_INTERRUPTED -> {
-                            updateDebug { it.copy(lastEvent = "TV interrumpido") }
-                        }
-                        MediaStatus.IDLE_REASON_NONE -> {
-                            // IDLE sin razón específica suele significar que la cola
-                            // nunca llegó a cargarse. Es el caso típico cuando
-                            // STREAM_TYPE_NONE no funciona en este TV.
-                            val msg = if (queueSize == 0) "TV IDLE sin items cargados"
-                                      else "TV IDLE con $queueSize items (no reproduce)"
-                            updateDebug { it.copy(lastEvent = msg) }
-                        }
-                    }
-                }
-                MediaStatus.PLAYER_STATE_PLAYING -> {
-                    updateDebug { it.copy(lastEvent = "Reproduciendo en TV") }
-                }
-                MediaStatus.PLAYER_STATE_BUFFERING -> {
-                    updateDebug { it.copy(lastEvent = "TV cargando...") }
-                }
-                MediaStatus.PLAYER_STATE_PAUSED -> {
-                    updateDebug { it.copy(lastEvent = "TV pausado") }
-                }
-            }
+        } catch (e: Exception) {
+            updateDebug { it.copy(lastEvent = "[receiver] ${message.take(80)}") }
         }
+    }
+
+    private fun stateFromEvent(event: String): Int = when (event) {
+        "playing" -> MediaStatus.PLAYER_STATE_PLAYING
+        "paused" -> MediaStatus.PLAYER_STATE_PAUSED
+        "buffering" -> MediaStatus.PLAYER_STATE_BUFFERING
+        "idle" -> MediaStatus.PLAYER_STATE_IDLE
+        "ended" -> MediaStatus.PLAYER_STATE_IDLE
+        else -> -1
     }
 
     private fun updateDebug(transform: (CastDebugInfo) -> CastDebugInfo) {
@@ -379,17 +380,20 @@ class CastManager(
         _debugInfo.value = transform(current).copy(lastEventAtMs = System.currentTimeMillis())
     }
 
-    private fun buildYoutubeUrl(videoId: String): String {
-        // Formato canónico para que la app YouTube TV reconozca el video.
-        return "https://www.youtube.com/watch?v=$videoId"
-    }
-
     companion object {
         private const val TAG = "CastManager"
 
         /**
-         * Alias local del APP_ID para no importar la clase del provider en cada
-         * sitio. La fuente de verdad es `JamytCastOptionsProvider.APP_ID`.
+         * Custom Cast namespace para mensajes entre la app Android y el
+         * Custom Receiver. Debe coincidir exactamente con el constante
+         * `NAMESPACE` en `receiver/player.js`. Empieza con `urn:x-cast:`
+         * (requisito del protocolo Cast).
+         */
+        const val NAMESPACE = "urn:x-cast:com.jamyt.cola"
+
+        /**
+         * Alias local al APP_ID para no importar la clase del provider
+         * en cada sitio. La fuente de verdad es `JamytCastOptionsProvider.APP_ID`.
          */
         private val APP_ID = JamytCastOptionsProvider.APP_ID
     }
