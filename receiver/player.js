@@ -224,11 +224,17 @@
 
     try {
       const options = new cast.framework.CastReceiverOptions();
+      // disableIdleTimeout: con el playback siendo YouTube IFrame (no media
+      // Cast directo), el framework cuenta 5 minutos de inactividad y cierra
+      // la sesión (`error=2055`). El Cast framework pide que solo se use
+      // para apps non-media, que es exactamente nuestro caso (el playback
+      // real va por IFrame; nada de comandos CAF de media).
+      options.disableIdleTimeout = true;
       // No necesitamos un PlayerManager custom; el <cast-media-player>
       // existe en el DOM pero no lo usamos (display:none). El cast framework
       // solo requiere su presencia para inicializarse.
       context.start(options);
-      logOk('context.start(options) OK — receiver is now Cast-ready');
+      logOk('context.start(options) OK — receiver is now Cast-ready (disableIdleTimeout=true)');
       overlayHint(
         'Receptor listo. Auto-hide en 6s. Si recibes mensajes del sender, ' +
         'verás: load, play, pause, status events.',
@@ -338,12 +344,6 @@
           queue = [];
           currentIndex = -1;
           sendStatus({ op: 'status', event: 'stopped' });
-          break;
-        case 'ping':
-          // Heartbeat keep-alive del sender. No hacemos nada; lo importante
-          // es que la trama viaje para evitar que el Cast framework cierre la
-          // sesión por inactividad. Antes caía en el `default` con un log
-          // ruidoso cada 10s.
           break;
         default:
           log('Op desconocida: ' + op);
