@@ -5,7 +5,9 @@ import com.jamyt.queue.QueueItem
 import com.jamyt.queue.QueueRepository
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -40,32 +42,46 @@ class PlaybackController(
     //   from the main thread` desde el watcher.
     // - `.immediate` evita un re-post al main looper cuando ya estamos en él.
     private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate),
+
+    // Job del watcher de queue. La reemplazamos en cada nueva sesión Cast para
+    // evitar acumulación: sin esto, cada start/resume del Cast disparaba un
+    // `scope.launch { collectLatest ... }` adicional que se quedaba vivo; con
+    // 4 ciclos suspend/resume teníamos 4 watchers emitiendo sendCurrentQueueToTv
+    // (4-6 mensajes `Sent loadQueue` por cada `repository.add()`).
+    private var queueWatcherJob: Job? = null,
 ) {
     /**
      * Llamado por el CastManager cuando cambia la sesión Cast
      * (true = TV conectado, false = desconectado).
      *
-     * Cuando se conecta: enviamos la cola actual.
-     * Cuando se desconecta: cancelamos el watcher de cambios.
+     * Cuando se conecta: cancela el watcher anterior (si existe) y lanza uno
+     * nuevo. El nuevo watcher hace DOS cosas en una sola coroutine:
+     *   1. Lee el valor actual del StateFlow y lo envía.
+     *   2. Se suscribe a emits futuros (collectLatest) para reenviar la cola.
+     *
+     * Esto evita la duplicación de envíos y elimina la acumulación de watchers.
      */
     fun onCastSessionChanged(isConnected: Boolean) {
         if (isConnected) {
-            // Enviamos la cola actual inmediatamente al TV.
-            scope.launch { sendCurrentQueueToTv() }
-            // Y nos suscribimos a cambios futuros: si la cola cambia (porque
-            // otro peer añadió algo), recargar el TV con la nueva cola.
-            scope.launch {
+            // Cancelar el anterior evita acumulación de watchers tras varios
+            // suspend/resume (cada watcher dispara un envío por emit del queue).
+            queueWatcherJob?.cancel()
+            queueWatcherJob = scope.launch {
+                // (1) Enviar estado actual primero (collectLatest re-evalúa este
+                //     lambda en cada suscripción y con el valor inicial vigente).
+                sendCurrentQueueToTv()
+                // (2) Estar atento a cambios futuros.
                 repository.queue.collectLatest { queue ->
-                    // Evitamos un bucle: no recargar si la cola está vacía.
                     if (queue.items.isEmpty()) return@collectLatest
                     sendCurrentQueueToTv()
                 }
             }
+        } else {
+            // Sesión cerrada: cancela watcher. Cuando se reconecte crearemos
+            // uno nuevo con el estado fresco del StateFlow.
+            queueWatcherJob?.cancel()
+            queueWatcherJob = null
         }
-        // Si se desconecta, el scope del launch sigue vivo pero los envíos
-        // serán no-ops (castManager.isConnected() == false). Lo dejamos así
-        // para simplificar: cuando se reconecte, collectLatest se re-evaluará
-        // y enviará.
     }
 
     /**

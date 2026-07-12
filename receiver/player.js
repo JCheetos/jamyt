@@ -339,6 +339,12 @@
           currentIndex = -1;
           sendStatus({ op: 'status', event: 'stopped' });
           break;
+        case 'ping':
+          // Heartbeat keep-alive del sender. No hacemos nada; lo importante
+          // es que la trama viaje para evitar que el Cast framework cierre la
+          // sesión por inactividad. Antes caía en el `default` con un log
+          // ruidoso cada 10s.
+          break;
         default:
           log('Op desconocida: ' + op);
       }

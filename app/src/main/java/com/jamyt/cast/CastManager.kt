@@ -10,10 +10,14 @@ import com.google.android.gms.cast.framework.SessionManagerListener
 import com.jamyt.queue.QueueItem
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -100,6 +104,10 @@ class CastManager(
     // Executor dedicado para inicializar CastContext (la API v22 lo requiere).
     private val executor = Executors.newSingleThreadExecutor()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+
+    // Job del heartbeat. La reemplazamos en cada nueva sesión Cast para evitar
+    // acumulación. null = sin heartbeat activo.
+    private var heartbeatJob: Job? = null
 
     /**
      * Inicializa el Cast SDK. Llamar una sola vez en onCreate de la Activity
@@ -227,6 +235,7 @@ class CastManager(
      * al volver a foreground).
      */
     fun shutdown() {
+        stopHeartbeat()
         try {
             castContext?.sessionManager?.removeSessionManagerListener(
                 sessionManagerListener,
@@ -240,6 +249,46 @@ class CastManager(
         try {
             executor.shutdown()
         } catch (_: Exception) {}
+    }
+
+    /**
+     * Keep-alive: cada N segundos envía un mensaje `ping` al receiver para
+     * mantener la sesión Cast activa. Sin esto, algunas políticas del framework
+     * Cast cierran la sesión tras ~30-90s sin tráfico del sender (ver Notion
+     * de JamYT para el caso documentado: `error=2055` post-resume).
+     *
+     *  - Inicia en `onSessionStarted` y `onSessionResumed`.
+     *  - Para en `onSessionEnded`.
+     *  - `Suspended` no la detiene: la sesión puede volver automáticamente y
+     *    queremos seguir mandando heartbeats mientras existe la sesión.
+     */
+    private fun startHeartbeat() {
+        heartbeatJob?.cancel()
+        heartbeatJob = scope.launch {
+            // Primer ping tras un pequeño respiro, no inmediato al arranque.
+            delay(2_000L)
+            while (isActive) {
+                try {
+                    val session = castSession
+                    if (session != null && session.isConnected) {
+                        val ping = JSONObject().apply {
+                            put("op", "ping")
+                            put("ts", System.currentTimeMillis())
+                        }
+                        val ok = session.sendMessage(NAMESPACE, ping.toString())
+                        Log.d(TAG, "heartbeat sent ok=$ok")
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "heartbeat send failed: ${e.message}")
+                }
+                delay(HEARTBEAT_INTERVAL_MS)
+            }
+        }
+    }
+
+    private fun stopHeartbeat() {
+        heartbeatJob?.cancel()
+        heartbeatJob = null
     }
 
     // ---- Privados ----
@@ -260,6 +309,7 @@ class CastManager(
                 Log.w(TAG, "setMessageReceivedCallbacks failed: ${e.message}")
             }
             updateDebug { it.copy(isConnected = true, lastEvent = "▶ TV conectado (sid=${sessionId.take(6)})") }
+            startHeartbeat()
             onSessionChanged(true)
         }
 
@@ -277,6 +327,7 @@ class CastManager(
 
         override fun onSessionEnded(session: CastSession, error: Int) {
             Log.i(TAG, "onSessionEnded: error=$error")
+            stopHeartbeat()
             try {
                 castSession?.removeMessageReceivedCallbacks(NAMESPACE)
             } catch (_: Exception) {}
@@ -307,6 +358,7 @@ class CastManager(
                 Log.w(TAG, "setMessageReceivedCallbacks failed on resume: ${e.message}")
             }
             updateDebug { it.copy(isConnected = true, lastEvent = "↻ TV reconectado (wasSuspended=$wasSuspended)") }
+            startHeartbeat()
             onSessionChanged(true)
         }
 
@@ -396,5 +448,13 @@ class CastManager(
          * en cada sitio. La fuente de verdad es `JamytCastOptionsProvider.APP_ID`.
          */
         private val APP_ID = JamytCastOptionsProvider.APP_ID
+
+        /**
+         * Intervalo entre heartbeats para mantener la sesión Cast activa.
+         * 10s es seguro: las políticas de inactivity del Cast SDK suelen
+         * estar en el rango 30-90s, así que damos ~3-9× margen sin saturar
+         * la LAN con tráfico inútil.
+         */
+        private const val HEARTBEAT_INTERVAL_MS = 10_000L
     }
 }
