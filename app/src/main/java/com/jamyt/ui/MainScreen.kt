@@ -21,6 +21,7 @@ import com.jamyt.queue.QueueItem
 import androidx.compose.runtime.collectAsState
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.mediarouter.app.MediaRouteButton
+import androidx.mediarouter.media.MediaControlIntent
 import androidx.mediarouter.media.MediaRouteSelector
 import com.google.android.gms.cast.CastMediaControlIntent
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -54,14 +55,25 @@ fun MainScreen(
 
     // Selector de rutas Cast: descubre TVs/Chromecasts en la LAN.
     // El MediaRouteButton abre un dialog estándar de Android con los TVs disponibles.
-    // Importante: usamos categoryForCast(APP_ID) y NO CATEGORY_REMOTE_PLAYBACK.
-    // La categoría genérica establecía una sesión "generic remote playback"
-    // (volume funciona, media load no llega a ningún receiver, y el
-    // SessionManagerListener<CastSession> no dispara). Con categoryForCast(APP_ID)
-    // la sesión queda vinculada al APP_ID de Jamyt y es una CastSession real.
+    //
+    // Patrón de doble categoría (estándar en apps Cast de Google):
+    //  - `categoryForCast(APP_ID)` filtra devices que conocen nuestro APP_ID,
+    //    garantizando una `CastSession` real al castear (no generic remote
+    //    playback como con un selector "puro" genérico).
+    //  - `CATEGORY_LIVE_VIDEO` es el fallback para descubrimiento: cuando el
+    //    Custom Receiver está recién registrado en Cast Console, los TVs
+    //    pueden tardar entre 15 min y 24h en enterarse del nuevo APP_ID.
+    //    Esta categoría muestra los Cast devices aunque aún no conozcan el
+    //    nuestro; cuando el usuario selecciona uno, el Cast framework
+    //    descarga la URL del receiver bajo demanda desde Cast Console.
+    //
+    // Ambas son necesarias. Quitar la primera provoca sesiones genéricas
+    // (que vimos antes con "volume sí, media no"). Quitar la segunda
+    // provoca "no hay dispositivos" durante el periodo de propagación.
     val routeSelector = remember {
         MediaRouteSelector.Builder()
             .addControlCategory(CastMediaControlIntent.categoryForCast(com.jamyt.cast.JamytCastOptionsProvider.APP_ID))
+            .addControlCategory(MediaControlIntent.CATEGORY_LIVE_VIDEO)
             .build()
     }
 
