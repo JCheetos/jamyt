@@ -5,8 +5,11 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.CreationExtras
 import com.jamyt.domain.repository.CastingGateway
+import com.jamyt.domain.usecase.CastUseCases
+import com.jamyt.domain.usecase.ObserveTvItemFinished
+import com.jamyt.domain.usecase.ObserveQueueSyncOnTv
+import com.jamyt.domain.usecase.QueueUseCases
 import com.jamyt.lan.MeshCoordinator
-import com.jamyt.queue.QueueItem
 import com.jamyt.queue.QueueRepository
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -17,26 +20,25 @@ import kotlinx.coroutines.launch
 /**
  * ViewModel principal de JamYT.
  *
- * Responsabilidades:
- *   1. Combinar los flujos reactivos de las capas inferiores en un único
- *      [MainUiState] que la UI consume — `state` es la única superficie.
- *   2. Traducir [MainIntent]s en acciones sobre las dependencias
- *      (QueueRepository, CastingGateway, MeshCoordinator).
- *   3. Orquestar el flujo "cola local → Cast" cuando hay sesión activa.
- *      Mantenemos esa lógica en el VM (no en un UseCase todavía) porque es
- *      el único caso donde el VM necesita coordinarse con un evento externo
- *      (cambio de queue + cambio de session state); en Fase 3 lo movemos
- *      a `LoadQueueOnTvUseCase` para tener un test JVM puro de este flow.
- *   4. Reaccionar al evento `tvItemFinished` del gateway para quitar el
- *      videoId correspondiente de la cola local (esto lo hacía
- *      `PlaybackController` en versiones anteriores, ahora absorbido por
- *      el VM como orquestador natural).
+ * **Responsabilidades:** observar el state combinado y traducir [MainIntent]s
+ * en llamadas a [UseCases][com.jamyt.domain.usecase].
  *
- * **Lo que el VM ya NO hace tras Fase 2:**
- *   - No referencia directamente `CastManager` (solo `CastingGateway`)
- *   - No mantiene `PlaybackController` (eliminado)
- *   - No recibe callbacks `onSessionChanged` / `onPlaybackFinished`
- *     (reemplazados por observación reactiva de flows)
+ * **Lo que NO hace este VM (es importante):**
+ *   - No orquesta queue↔TV: eso vive en [ObserveQueueSyncOnTv] +
+ *     [ObserveTvItemFinished], iniciados/parados por este VM.
+ *   - No parsea URLs de YouTube: eso vive en [QueueUseCases.addItem].
+ *   - No tiene lógica de control Cast (pause/resume/skipNext): eso vive
+ *     en [CastUseCases].
+ *   - No referencia directamente clases Cast de Google ([CastingGateway] es
+ *     la única dependencia de Cast-related, vía interface).
+ *
+ * Después de la Fase 3 cada dependencia es lógica testeable en JVM puro.
+ * Las clases de tests vendrán al final del refactor (Fase 4 / cierre).
+ *
+ * **Lo que el VM sí hace:**
+ *   - Combinar los flujos reactivos para producir un [MainUiState] único.
+ *   - Iniciar/parar los observadores de reacciones en `init`/`onCleared`.
+ *   - Mantener un punto de entrada único para intents: [onIntent].
  */
 class MainViewModel(
     private val repository: QueueRepository,
@@ -44,10 +46,11 @@ class MainViewModel(
     private val castingGateway: CastingGateway,
 ) : ViewModel() {
 
-    /**
-     * Estado único expuesto a la UI. Se reconstruye automáticamente cuando
-     * cualquiera de los flujos fuente emite un nuevo valor.
-     */
+    // ── Operadores reactivos: cycle de vida atado al VM ─────────────────
+    private val syncOp = ObserveQueueSyncOnTv(repository, castingGateway)
+    private val finishedOp = ObserveTvItemFinished(repository, castingGateway)
+
+    // ── State único para la UI ──────────────────────────────────────────
     val state: StateFlow<MainUiState> = combine(
         repository.queue,
         meshCoordinator.peers,
@@ -67,65 +70,55 @@ class MainViewModel(
     )
 
     init {
-        // ── Auto-sync de la cola hacia el TV ─────────────────────────────
-        // Cuando hay sesión Cast activa y la cola local cambia (add, remove,
-        // sync desde mesh, etc.), reenviamos la cola completa al receiver.
-        //
-        // El smart loadQueue del receptor evita reiniciar si el videoId
-        // actualmente en reproducción sigue presente en la nueva cola.
-        viewModelScope.launch {
-            combine(repository.queue, castingGateway.isConnected) { queue, connected ->
-                if (connected) queue.items else null
-            }.collect { items ->
-                if (items != null) {
-                    castingGateway.loadQueueOnTv(items, startIndex = 0)
-                }
-            }
-        }
+        syncOp.start()
+        finishedOp.start()
+    }
 
-        // ── Reacción a "TV terminó video" ────────────────────────────────
-        // El receptor (player.js) envía un status `ended` con videoId cuando
-        // YouTube dispara ENDED. Lo quitamos de la cola local; el `combine`
-        // de arriba re-enviará la cola actualizada al TV automáticamente.
-        viewModelScope.launch {
-            castingGateway.tvItemFinished.collect { videoId ->
-                repository.remove(videoId)
-            }
-        }
+    override fun onCleared() {
+        super.onCleared()
+        syncOp.stop()
+        finishedOp.stop()
     }
 
     /**
-     * Único punto de entrada de la UI. Sealed `MainIntent` permite que cada
-     * llamada sea atómica y testeable de forma aislada.
+     * Único punto de entrada de la UI. El cuerpo es esencialmente un
+     * dispatch table; la lógica vive en los UseCases y Operators.
      */
     fun onIntent(intent: MainIntent) {
         when (intent) {
             is MainIntent.AddItem -> handleAddItem(intent)
             is MainIntent.RemoveItem -> handleRemoveItem(intent)
             MainIntent.ClearQueue -> handleClearQueue()
-            MainIntent.PausePlayback -> castingGateway.pause()
-            MainIntent.ResumePlayback -> castingGateway.resume()
-            MainIntent.SkipNext -> castingGateway.skipToNext()
+            MainIntent.PausePlayback -> CastUseCases.pause(castingGateway)
+            MainIntent.ResumePlayback -> CastUseCases.resume(castingGateway)
+            MainIntent.SkipNext -> CastUseCases.skipNext(castingGateway)
         }
     }
 
     private fun handleAddItem(intent: MainIntent.AddItem) {
-        val item = QueueItem.fromYoutubeUrl(
-            rawUrl = intent.url,
-            title = intent.title,
-            addedBy = meshCoordinator.localName,
-        ) ?: return
-        // repository.add() → onLocalChange → MeshCoordinator decide si
-        // hacer broadcast al mesh (Fase 3 moverá esto a un UseCase).
-        viewModelScope.launch { repository.add(item) }
+        viewModelScope.launch {
+            QueueUseCases.addItem(
+                repository = repository,
+                meshCoordinator = meshCoordinator,
+                rawUrl = intent.url,
+                title = intent.title,
+            )
+            // Devuelve Boolean, pero la UI no necesita saber si fue éxito:
+            // si la URL no era YouTube, el item simplemente no se añade y
+            // el queue no cambia. La UI no muestra nada especial.
+        }
     }
 
     private fun handleRemoveItem(intent: MainIntent.RemoveItem) {
-        viewModelScope.launch { repository.remove(intent.itemId) }
+        viewModelScope.launch {
+            QueueUseCases.removeItem(repository, intent.itemId)
+        }
     }
 
     private fun handleClearQueue() {
-        viewModelScope.launch { repository.clear() }
+        viewModelScope.launch {
+            QueueUseCases.clearQueue(repository)
+        }
     }
 
     /**
