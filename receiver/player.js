@@ -432,7 +432,12 @@
             break;
           case window.YT_ENDED:
             log('→ YT ENDED: auto-advance');
-            sendStatus({ op: 'status', event: 'ended', index: currentIndex });
+            // Incluimos videoId en el evento ended para que el sender (VM) pueda
+            // quitar el item exacto de la cola sin asumir FIFO — relevante en
+            // escenarios con varios peers modificando la cola concurrentemente.
+            const endedVideoId = (currentIndex >= 0 && queue[currentIndex])
+              ? queue[currentIndex].videoId : '';
+            sendStatus({ op: 'status', event: 'ended', index: currentIndex, videoId: endedVideoId });
             // Auto-advance dentro del mismo queue
             if (queue.length > 0) {
               const nextIdx = (currentIndex + 1) % queue.length;

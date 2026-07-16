@@ -12,46 +12,41 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.jamyt.cast.CastDebugInfo
 import com.jamyt.lan.PeerInfo
 import com.jamyt.queue.JamQueue
 import com.jamyt.queue.QueueItem
-import androidx.compose.runtime.collectAsState
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.mediarouter.app.MediaRouteButton
 import androidx.mediarouter.media.MediaControlIntent
 import androidx.mediarouter.media.MediaRouteSelector
 import com.google.android.gms.cast.CastMediaControlIntent
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.StateFlow
+import com.jamyt.viewmodel.MainIntent
+import com.jamyt.viewmodel.MainUiState
 
 /**
  * Pantalla principal: muestra la cola, los peers conectados, y botones para añadir/eliminar.
  *
+ * Tras el refactor arquitectónico (Fase 1) esta función es puramente
+ * declarativa: recibe [state] (un snapshot inmutable) y un callback
+ * [onIntent] para enviar acciones al ViewModel. NO accede a repositorios
+ * ni a Cast SDK directamente — eso lo hace el VM.
+ *
  * El header indica:
- * - Si somos coordinador ("Yo soy el host de la cola")
- * - Si hay otro coordinador (muestra nombre + IP)
- * - Cantidad de peers conectados
- * - Si la cola está vacía o próxima a expirar
+ * - Cantidad de peers conectados (anteriormente "coordinador", ahora P2P mesh).
+ * - Si hay Cast activo y qué está reproduciendo el TV.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MainScreen(
-    queue: JamQueue,
-    peers: List<PeerInfo>,
-    isCastConnected: StateFlow<Boolean> = MutableStateFlow(false),
-    castDebugInfo: StateFlow<com.jamyt.cast.CastDebugInfo> = MutableStateFlow(com.jamyt.cast.CastDebugInfo()),
-    onAddItem: (String, String) -> Unit,
-    onRemoveItem: (String) -> Unit,
-    onClearQueue: () -> Unit,
+    state: MainUiState,
+    onIntent: (MainIntent) -> Unit,
 ) {
     var showAddDialog by remember { mutableStateOf(false) }
     var showClearDialog by remember { mutableStateOf(false) }
     var showDebugPanel by remember { mutableStateOf(true) }
-
-    val debugInfo by castDebugInfo.collectAsState()
 
     // Selector de rutas Cast: descubre TVs/Chromecasts en la LAN.
     // El MediaRouteButton abre un dialog estándar de Android con los TVs disponibles.
@@ -96,7 +91,7 @@ fun MainScreen(
                     )
                     IconButton(
                         onClick = { showClearDialog = true },
-                        enabled = queue.items.isNotEmpty(),
+                        enabled = state.queue.items.isNotEmpty(),
                     ) {
                         Icon(Icons.Default.DeleteSweep, contentDescription = "Limpiar cola")
                     }
@@ -115,13 +110,12 @@ fun MainScreen(
         },
     ) { padding ->
         Column(modifier = Modifier.padding(padding).fillMaxSize()) {
-            // Bug corregido: se leía `.value` directamente, lo que NO disparaba
-            // recomposición cuando cambiaba el StateFlow. Ahora lo envolvemos
-            // con `collectAsState()` para que el banner reaccione en vivo.
-            val isConnected by isCastConnected.collectAsState()
-            StatusBanner(peerCount = peers.size, isCastConnected = isConnected)
+            StatusBanner(
+                peerCount = state.peers.size,
+                isCastConnected = state.isCastConnected,
+            )
 
-            if (queue.items.isEmpty()) {
+            if (state.queue.items.isEmpty()) {
                 EmptyState(modifier = Modifier.weight(1f))
             } else {
                 LazyColumn(
@@ -129,21 +123,23 @@ fun MainScreen(
                     contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    items(queue.items, key = { it.itemId }) { item ->
-                        QueueItemCard(item = item, onRemove = { onRemoveItem(item.itemId) })
+                    items(state.queue.items, key = { it.itemId }) { item ->
+                        QueueItemCard(
+                            item = item,
+                            onRemove = { onIntent(MainIntent.RemoveItem(item.itemId)) },
+                        )
                     }
                 }
             }
 
-            if (peers.isNotEmpty()) {
-                PeersBar(peers = peers)
+            if (state.peers.isNotEmpty()) {
+                PeersBar(peers = state.peers)
             }
 
             // Panel de diagnóstico del Cast. Muestra el estado del TV en tiempo
-            // real sin necesidad de adb/logcat. Útil para depurar problemas
-            // con STREAM_TYPE_NONE y carga de cola.
+            // real sin necesidad de adb/logcat.
             CastDebugPanel(
-                debug = debugInfo,
+                debug = state.castDebug,
                 expanded = showDebugPanel,
                 onToggle = { showDebugPanel = !showDebugPanel },
             )
@@ -154,7 +150,7 @@ fun MainScreen(
         AddVideoDialog(
             onDismiss = { showAddDialog = false },
             onConfirm = { url, title ->
-                onAddItem(url, title)
+                onIntent(MainIntent.AddItem(url = url, title = title))
                 showAddDialog = false
             },
         )
@@ -162,10 +158,10 @@ fun MainScreen(
 
     if (showClearDialog) {
         ConfirmClearDialog(
-            itemCount = queue.items.size,
+            itemCount = state.queue.items.size,
             onDismiss = { showClearDialog = false },
             onConfirm = {
-                onClearQueue()
+                onIntent(MainIntent.ClearQueue)
                 showClearDialog = false
             },
         )

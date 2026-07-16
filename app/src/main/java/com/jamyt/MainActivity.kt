@@ -5,49 +5,45 @@ import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
-import androidx.compose.runtime.*
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.viewmodel.compose.viewModel
 import com.jamyt.cast.CastManager
-import com.jamyt.cast.PlaybackController
 import com.jamyt.lan.LanSyncServer
 import com.jamyt.lan.MeshCoordinator
 import com.jamyt.lan.PeerDiscovery
-import com.jamyt.queue.QueueItem
 import com.jamyt.queue.QueueRepository
 import com.jamyt.ui.MainScreen
-import androidx.compose.runtime.collectAsState
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.StateFlow
+import com.jamyt.viewmodel.MainViewModel
+import com.jamyt.domain.repository.CastingGateway
 import kotlinx.coroutines.launch
 
 class MainActivity : FragmentActivity() {
 
+    // Inyectadas por `onCreate` y pasadas al [MainViewModel.Factory]. Mantenemos
+    // las referencias como `lateinit` por ergonomía — la actividad es una
+    // capa fina de hosting, no la dueña del ciclo de vida de los servicios.
     private lateinit var repository: QueueRepository
     private lateinit var discovery: PeerDiscovery
     private lateinit var server: LanSyncServer
     private lateinit var mesh: MeshCoordinator
     private lateinit var castManager: CastManager
-    private lateinit var playbackController: PlaybackController
-
-    /**
-     * Estado reactivo: ¿hay un TV conectado vía Cast?
-     * Lo consume el composable para mostrar el MediaRouteButton con el
-     * estado adecuado (icono activo vs. inactivo).
-     */
-    private val isCastConnected = MutableStateFlow(false)
+    private lateinit var castingGateway: CastingGateway
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        // 1. Construcción de dependencias.
         repository = QueueRepository.get(applicationContext)
         val localName = android.os.Build.MODEL ?: "Android"
 
         discovery = PeerDiscovery(this, serviceName = localName)
         server = LanSyncServer(onMessage = { msg, sock ->
-            // Identificamos al peer que envió el mensaje (si ya recibimos su Hello).
-            // Si aún no hay Hello, fromPeerId queda vacío y el coordinator decide.
+            // Identificamos al peer que envió el mensaje. Si aún no hay Hello,
+            // fromPeerId queda vacío y el coordinator decide.
             val fromPeerId = server.getPeerIdForSocket(sock)
             mesh.handleServerMessage(msg, fromPeerId)
         })
@@ -60,32 +56,30 @@ class MainActivity : FragmentActivity() {
             server = server,
         )
 
-        // Cast: inicializamos el SDK y conectamos los callbacks.
-        // El PlaybackController coordina entre la cola local y el TV.
-        castManager = CastManager(
-            context = applicationContext,
-            onSessionChanged = { connected ->
-                isCastConnected.value = connected
-                playbackController.onCastSessionChanged(connected)
-            },
-            onPlaybackFinished = {
-                // El TV terminó un video; quitamos el item de la cola local.
-                playbackController.handleVideoFinished()
-            },
-        )
+        // Cast: implementamos [CastingGateway] directamente aquí. Antes había
+        // un `PlaybackController` que orquestaba queue ↔ TV; tras Fase 2 esa
+        // orquestación vive en el ViewModel (combine de queue + isConnected).
+        castManager = CastManager(context = applicationContext)
+        castingGateway = castManager
         castManager.initialize()
 
-        playbackController = PlaybackController(repository, castManager)
+        // 2. ViewModel con inyección manual de dependencias (sin Hilt ni
+        //    ViewModelProvider.AndroidViewModelFactory — el ViewModel necesita
+        //    instancias con scope de Activity, no Application).
+        val factory = MainViewModel.Factory(
+            repository = repository,
+            meshCoordinator = mesh,
+            castingGateway = castingGateway,
+        )
 
         setContent {
             MaterialTheme {
                 Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-                    JamApp(
-                        repository = repository,
-                        discovery = discovery,
-                        isCastConnected = isCastConnected,
-                        castDebugInfo = castManager.debugInfo,
-                    )
+                    // `viewModel(factory = factory)` registra el VM con el
+                    // ViewModelStoreOwner de esta Activity y devuelve el mismo
+                    // singleton en recomposiciones.
+                    val viewModel: MainViewModel = viewModel(factory = factory)
+                    JamTheme(viewModel)
                 }
             }
         }
@@ -94,8 +88,9 @@ class MainActivity : FragmentActivity() {
     override fun onStart() {
         super.onStart()
         // Arrancamos server y discovery primero; el mesh espera a que
-        // load() haya terminado para evitar broadcasts con estado vacío
-        // cuando en realidad tenemos items + tombstones persistidos.
+        // `repository.load()` haya terminado para evitar broadcasts con
+        // estado vacío cuando en realidad tenemos items + tombstones
+        // persistidos.
         server.start()
         discovery.start()
         lifecycleScope.launch {
@@ -114,41 +109,14 @@ class MainActivity : FragmentActivity() {
         //    del proceso, no a la Activity. Quitarlo en onStop era incorrecto
         //    y dejaba el CastDebugPanel ciego al volver a foreground.
         //  - Si el proceso entero muere, el OS libera todos los listeners.
-        // Por eso NO llamamos castManager.shutdown() aquí. Si en el futuro
-        // necesitamos liberar algo (ej. el executor), se hace en onDestroy.
         mesh.stop()
         discovery.stop()
         server.stop()
     }
 }
 
-@Composable
-private fun JamApp(
-    repository: QueueRepository,
-    discovery: PeerDiscovery,
-    isCastConnected: StateFlow<Boolean>,
-    castDebugInfo: StateFlow<com.jamyt.cast.CastDebugInfo>,
-) {
-    val queue by repository.queue.collectAsState()
-    val peers by discovery.peers.collectAsState()
-
-    MainScreen(
-        queue = queue,
-        peers = peers.values.toList(),
-        isCastConnected = isCastConnected,
-        // Bug corregido: faltaba pasar el castDebugInfo del StateHolder al UI.
-        // Sin esto, MainScreen usaba su default MutableStateFlow(CastDebugInfo())
-        // — un StateFlow vacío que updateDebug nunca toca. Por eso el panel
-        // se quedaba en "—" pese a que el listener SÍ disparaba los logs.
-        castDebugInfo = castDebugInfo,
-        onAddItem = { url, title ->
-            val item = QueueItem.fromYoutubeUrl(url, title, addedBy = android.os.Build.MODEL ?: "Yo")
-            if (item != null) {
-                // add() invoca onLocalChange → MeshCoordinator hace broadcast al mesh.
-                repository.add(item)
-            }
-        },
-        onRemoveItem = { itemId -> repository.remove(itemId) },
-        onClearQueue = { repository.clear() },
-    )
+@androidx.compose.runtime.Composable
+private fun JamTheme(viewModel: MainViewModel) {
+    val state by viewModel.state.collectAsState()
+    MainScreen(state = state, onIntent = viewModel::onIntent)
 }

@@ -8,6 +8,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
@@ -42,13 +43,31 @@ class MeshCoordinator(
     private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
     private val repository: QueueRepository,
     private val localPeerId: String,
-    private val localName: String,
+    /**
+     * Nombre legible del dispositivo en LAN. Público para que el ViewModel
+     * pueda firmar los items añadidos con "quién lo añadió" sin tener que
+     * pasar por el dominio (mantenemos la firma simple hasta Fase 3, cuando
+     * un UseCase reciba el dispatcher `addedBy` inyectado).
+     */
+    val localName: String,
     private val discovery: PeerDiscovery,
     private val server: LanSyncServer,
 ) {
     private val connections = mutableMapOf<String, LanSyncClient>()
     private var peersJob: Job? = null
     private var expiryJob: Job? = null
+
+    /**
+     * Snapshot observable del mapa de peers descubiertos en LAN. Se reenvía
+     * directamente desde [discovery.peers] para que la UI pueda verlo sin
+     * tocar la API privada del coordinator. El mapa es inmutable para que
+     * cualquier compositor que lo observe detecte cambios por referencia.
+     *
+     * Tras Fase 4 este flow vivirá detrás de un UseCase `ObservePeersUseCase`;
+     * de momento exponerlo aquí es el puente mínimo hacia la UI sin
+     * introducir más capas antes de tiempo.
+     */
+    val peers: StateFlow<Map<String, PeerInfo>> = discovery.peers
 
     fun start() {
         if (peersJob?.isActive == true) return

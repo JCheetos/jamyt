@@ -69,6 +69,9 @@ dependencies {
     // ViewModel + StateFlow
     implementation("androidx.lifecycle:lifecycle-viewmodel-ktx:2.8.2")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.2")
+    // Habilita `viewModel(factory = …)` y `viewModels()` en Composables. Necesario
+    // para la Fase 1 del refactor arquitectónico (MainViewModel).
+    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.2")
 
     // Room (persistencia)
     // KSP reemplaza a annotationProcessor para Kotlin: más rápido y oficialmente recomendado.

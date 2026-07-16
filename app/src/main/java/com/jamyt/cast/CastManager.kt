@@ -7,13 +7,20 @@ import com.google.android.gms.cast.MediaStatus
 import com.google.android.gms.cast.framework.CastContext
 import com.google.android.gms.cast.framework.CastSession
 import com.google.android.gms.cast.framework.SessionManagerListener
+import com.jamyt.domain.repository.CastingGateway
 import com.jamyt.queue.QueueItem
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -56,59 +63,54 @@ private fun idleReasonName(reason: Int): String = when (reason) {
 }
 
 /**
- * Wrapper del Google Cast SDK (CAF v22.x).
+ * Implementación concreta de [CastingGateway] sobre Google Cast SDK v22.x.
  *
- * Estrategia v2 del archivo: usábamos `RemoteMediaClient.queueLoad(...)`
- * con `MediaInfo` y `STREAM_TYPE_NONE` para que el Default Media Receiver
- * rechazase con `idleReason=4 ERROR` y todo el control pasara por nuestro
- * Custom Receiver. Esto ya no funciona porque:
+ * **Esta clase NO debería ser referenciada directamente desde Composables,
+ * Composables VM o UseCases** — usar `CastingGateway` (interface). Solo esta
+ * implementación sabe de `com.google.android.gms.*`.
  *
- *   1. El DMR rechaza las URLs de YouTube (firma, no stream directo).
- *   2. El Custom Receiver nuevo (CAF v3) requiere `cast-media-player` en
- *      el DOM y eliminó `playerManager.setMediaElementRequestHandler`
- *      en favor de mensajes custom sobre namespace propio.
+ * **Modelo de mensajes custom** sobre namespace `urn:x-cast:com.jamyt.cola`:
+ *   - Sender → Receiver: `{"op":"loadQueue","items":[...],"startIndex":N}` /
+ *     `{"op":"play"}` / `{"op":"pause"}` / `{"op":"next"}` / `{"op":"stop"}`.
+ *   - Receiver → Sender: `{"op":"queue", size, index, videoId}` /
+ *     `{"op":"status", event, index, videoId}`.
  *
- * Estrategia v3 del archivo (la actual): hablamos con el receiver vía
- * `CastSession.sendMessage(NAMESPACE, json)` directamente. Saltamos
- * completamente `RemoteMediaClient` y `MediaInfo`. El receiver:
- *   - Recibe las instrucciones (loadQueue, play, pause, next, prev)
- *   - Crea YouTube IFrame Player directamente con los videoIds
- *   - Gestiona la cola de forma autónoma (auto-advance en ENDED)
- *   - Reporta status al sender vía messages de vuelta sobre el mismo
- *     namespace.
- *
- * Por qué funciona para YouTube: YouTube IFrame Player reproduce desde
- * `youtube.com/embed/<videoId>` — el navegador del TV puede hacer esto
- * directamente, sin que el SDK de Cast intente procesar el URL.
- *
- * Notas sobre la versión del SDK: play-services-cast-framework:22.1.0.
- * Las APIs custom (sendMessage, setMessageReceivedCallback, getCastSession)
- * funcionan en CAF v22.x y CAF v3 del Receiver.
+ * **Por qué custom messages y no `RemoteMediaClient`**:
+ *   CAF v3 eliminó `PlayerManager.setMediaElementRequestHandler` y la DMR
+ *   rechaza YouTube URLs. Usamos el canal custom + YouTube IFrame Player
+ *   en el receptor. El TV reproduce `youtube.com/embed/<videoId>` directamente.
  */
 class CastManager(
     private val context: Context,
-    private val onSessionChanged: (Boolean) -> Unit = {},
-    private val onPlaybackFinished: () -> Unit = {},
-) {
-    private var castContext: CastContext? = null
-    private var castSession: CastSession? = null
+) : CastingGateway {
 
-    // Estado del Cast expuesto a la UI para diagnóstico en pantalla.
-    private val _debugInfo = MutableStateFlow(CastDebugInfo())
-    val debugInfo: StateFlow<CastDebugInfo> = _debugInfo.asStateFlow()
-
-    // Executor dedicado para inicializar CastContext (la API v22 lo requiere).
+    // ── Recursos internos (declarados ANTES de los state observables porque
+    //    `isConnected` usa `scope` en su `stateIn`, y Kotlin inicializa las
+    //    `val` en orden textual) ────────────────────────────────────────────
     private val executor = Executors.newSingleThreadExecutor()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
+    // ── CastingGateway: state observables ─────────────────────────────────
+    private val _debugInfo = MutableStateFlow(CastDebugInfo())
+    override val debugInfo: StateFlow<CastDebugInfo> = _debugInfo.asStateFlow()
+
+    override val isConnected: StateFlow<Boolean> = _debugInfo
+        .map { it.isConnected }
+        .stateIn(scope, SharingStarted.Eagerly, false)
+
+    // Hot SharedFlow (replay=0) — un 'ended' es un evento, no un estado.
+    private val _tvItemFinished = MutableSharedFlow<String>(replay = 0)
+    override val tvItemFinished: SharedFlow<String> = _tvItemFinished.asSharedFlow()
+
+    // ── Casting SDK v22.x ─────────────────────────────────────────────────
+    private var castContext: CastContext? = null
+    private var castSession: CastSession? = null
+
     /**
-     * Inicializa el Cast SDK. Llamar una sola vez en onCreate de la Activity
-     * (o cada vez que el proceso se reconstruya tras onDestroy/onCreate).
-     *
-     * APP_ID y CastOptions vienen de `JamytCastOptionsProvider` (declarado
-     * en AndroidManifest con `OPTIONS_PROVIDER_CLASS_NAME`).
+     * Inicializa el Cast SDK y registra los listeners del framework.
+     * Llamar una sola vez en `onCreate` de la Activity.
      */
-    fun initialize() {
+    override fun initialize() {
         try {
             updateDebug { it.copy(lastEvent = "Cast init: empezando getSharedInstance…") }
             Log.i(TAG, "initialize() start, pid=${android.os.Process.myPid()}, tid=${Thread.currentThread().id}")
@@ -143,23 +145,14 @@ class CastManager(
     }
 
     /**
-     * Envía la cola de items al TV vía mensaje custom (NAMESPACE + JSON).
-     *
-     * Formato: `{"op":"loadQueue","items":[{"videoId","title"}],"startIndex":0}`
-     *
-     * El receiver los parsea, crea YouTube IFrame Players y reproduce
-     * el item en `startIndex`. Auto-advance es responsabilidad del receiver
-     * (cuando YouTube reporta ENDED).
-     *
-     * Suspendimos porque `CastSession.sendMessage` debe invocarse en main
-     * thread (es una llamada al binder del SDK Cast) — `withContext(Main.immediate)`
-     * lo asegura si estamos en una coroutine que ya corre allí, o cambia
-     * contexto si estamos en IO.
+     * Carga la cola de items en el TV. `suspend` porque la API del SDK
+     * Cast exige Main thread; internamente serializamos con
+     * `withContext(Main.immediate)`.
      */
-    suspend fun loadQueue(items: List<QueueItem>, startIndex: Int = 0) {
+    override suspend fun loadQueueOnTv(items: List<QueueItem>, startIndex: Int) {
         if (items.isEmpty()) return
         val session = castSession ?: run {
-            Log.w(TAG, "No hay sesión Cast activa; loadQueue ignorado")
+            Log.w(TAG, "No hay sesión Cast activa; loadQueueOnTv ignorado")
             return
         }
 
@@ -184,7 +177,7 @@ class CastManager(
             updateDebug {
                 it.copy(
                     lastLoadAttemptItems = items.size,
-                    lastEvent = "sent loadQueue(${items.size} items) ok=$ok",
+                    lastEvent = "sent loadQueue(${items.size}) ok=$ok",
                 )
             }
         } catch (e: Exception) {
@@ -194,14 +187,14 @@ class CastManager(
         }
     }
 
-    /** Salta al siguiente item en la cola (en el receiver). */
-    fun skipToNext() = sendOp("next")
+    /** Pausa la reproducción en el TV. No-op si no hay sesión. */
+    override fun pause() = sendOp("pause")
 
-    /** Pausa la reproducción en el TV (en el receiver). */
-    fun pause() = sendOp("pause")
+    /** Reanuda la reproducción en el TV. No-op si no hay sesión. */
+    override fun resume() = sendOp("play")
 
-    /** Reanuda la reproducción en el TV (en el receiver). */
-    fun resume() = sendOp("play")
+    /** Salta al siguiente item. No-op si no hay sesión. */
+    override fun skipToNext() = sendOp("next")
 
     private fun sendOp(op: String) {
         val session = castSession ?: return
@@ -216,17 +209,7 @@ class CastManager(
         }
     }
 
-    /** True si hay un TV conectado y la sesión Cast está activa. */
-    fun isConnected(): Boolean = castSession?.isConnected == true
-
-    /**
-     * Libera recursos. Llamar en onDestroy de la Activity si quieres
-     * ser proactivo. NO debe llamarse en onStop — el listener del
-     * SessionManager está atado al CastContext singleton, no a la
-     * Activity (si lo quitamos aquí, el CastDebugPanel quedaría ciego
-     * al volver a foreground).
-     */
-    fun shutdown() {
+    override fun shutdown() {
         try {
             castContext?.sessionManager?.removeSessionManagerListener(
                 sessionManagerListener,
@@ -242,7 +225,7 @@ class CastManager(
         } catch (_: Exception) {}
     }
 
-    // ---- Privados ----
+    // ── Internos ────────────────────────────────────────────────────────
 
     private val sessionManagerListener = object : SessionManagerListener<CastSession> {
         override fun onSessionStarting(session: CastSession) {
@@ -260,7 +243,6 @@ class CastManager(
                 Log.w(TAG, "setMessageReceivedCallbacks failed: ${e.message}")
             }
             updateDebug { it.copy(isConnected = true, lastEvent = "▶ TV conectado (sid=${sessionId.take(6)})") }
-            onSessionChanged(true)
         }
 
         override fun onSessionStartFailed(session: CastSession, error: Int) {
@@ -268,11 +250,9 @@ class CastManager(
             updateDebug { it.copy(lastEvent = "✗ onSessionStartFailed err=$error") }
         }
 
-        // API v22: este método es ahora obligatorio.
         override fun onSessionEnding(session: CastSession) {
             Log.i(TAG, "onSessionEnding (tid=${Thread.currentThread().id})")
             updateDebug { it.copy(lastEvent = "… onSessionEnding") }
-            // No-op: el cleanup real ocurre en onSessionEnded.
         }
 
         override fun onSessionEnded(session: CastSession, error: Int) {
@@ -290,7 +270,6 @@ class CastManager(
                     lastEvent = "■ TV desconectado (err=$error)",
                 )
             }
-            onSessionChanged(false)
         }
 
         override fun onSessionResuming(session: CastSession, sessionId: String) {
@@ -307,7 +286,6 @@ class CastManager(
                 Log.w(TAG, "setMessageReceivedCallbacks failed on resume: ${e.message}")
             }
             updateDebug { it.copy(isConnected = true, lastEvent = "↻ TV reconectado (wasSuspended=$wasSuspended)") }
-            onSessionChanged(true)
         }
 
         override fun onSessionResumeFailed(session: CastSession, error: Int) {
@@ -318,7 +296,6 @@ class CastManager(
         override fun onSessionSuspended(session: CastSession, reason: Int) {
             Log.i(TAG, "onSessionSuspended: reason=$reason")
             updateDebug { it.copy(lastEvent = "⏸ onSessionSuspended reason=$reason") }
-            // Mantenemos referencia para reanudar.
         }
     }
 
@@ -326,12 +303,12 @@ class CastManager(
      * Callback invocado cuando el Custom Receiver envía un mensaje de status
      * de vuelta al sender (namespace `urn:x-cast:com.jamyt.cola`).
      *
-     * Payload esperado desde el receiver (enviado desde `player.js`):
-     *   {"op":"status","event":"playing"|"paused"|"buffering"|"ended"|"queue"|"yt_ready","index":N}
+     * Eventos relevantes que el VM consume:
+     *   - `op=status, event=ended, videoId` → emite a `_tvItemFinished`
+     *   - resto → actualiza `CastDebugInfo` para el panel de la UI
      */
     private val messageCallback = Cast.MessageReceivedCallback { device, namespace, message ->
         // Firma real en v22.x: onMessageReceived(CastDevice device, String namespace, String message)
-        // NOTA: el `message` ya es String (no ByteArray); `device` es el CastDevice que lo envió.
         Log.i(TAG, "Message from ${device?.friendlyName ?: "?"} @ $namespace: $message")
         try {
             val json = JSONObject(message)
@@ -348,8 +325,14 @@ class CastManager(
                 op == "status" && event == "paused" -> "TV pausado"
                 op == "status" && event == "buffering" -> "TV cargando..."
                 op == "status" && event == "ended" -> {
-                    onPlaybackFinished()
-                    "TV terminó video"
+                    // El TV terminó un video. Si el receptor nos mandó el videoId,
+                    // lo emitimos al flow para que el VM lo quite de la cola.
+                    if (videoId.isNotEmpty()) {
+                        _tvItemFinished.tryEmit(videoId)
+                        "TV terminó $videoId"
+                    } else {
+                        "TV terminó video (sin videoId)"
+                    }
                 }
                 op == "status" && event == "error" -> "TV error: ${json.optString("detail", "")}"
                 else -> "[receiver] $op/$event"
